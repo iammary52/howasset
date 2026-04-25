@@ -32,7 +32,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
 from email import encoders
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import email.utils as _email_utils
 from pathlib import Path
 
 import openpyxl
@@ -90,6 +91,15 @@ def load_config():
         with open(CONFIG_PATH, encoding="utf-8") as f:
             return json.load(f)
     return {}
+
+
+def _decode_filename(raw: str) -> str:
+    from email.header import decode_header
+    parts = decode_header(raw)
+    return "".join(
+        p[0].decode(p[1] or "utf-8") if isinstance(p[0], bytes) else p[0]
+        for p in parts
+    )
 
 
 def fmt(v):
@@ -316,24 +326,41 @@ def download_excel_from_gmail(config: dict) -> Path:
     mail.login(addr, pwd)
     mail.select("inbox")
 
-    _, msgnums = mail.search(None, "UNSEEN")
+    # 오늘 날짜 기준으로 검색 범위 제한 후 1시간 이내 필터 적용
+    today_str = datetime.now().strftime("%d-%b-%Y")
+    _, msgnums = mail.search(None, f"SINCE {today_str}")
     all_msgs = msgnums[0].split()
     if not all_msgs:
-        raise FileNotFoundError("받은편지함에 미읽음 메일이 없습니다.")
+        raise FileNotFoundError("처리할 새 메일이 없습니다.")
+
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
 
     found_path = None
     for msgnum in reversed(all_msgs):
+        # 헤더만 먼저 가져와서 수신 시간 확인
+        _, hdr_data = mail.fetch(msgnum, "(RFC822.HEADER)")
+        hdr = email.message_from_bytes(hdr_data[0][1])
+        try:
+            msg_time = _email_utils.parsedate_to_datetime(hdr.get("Date", ""))
+            if msg_time.tzinfo is None:
+                msg_time = msg_time.replace(tzinfo=timezone.utc)
+            if msg_time < one_hour_ago:
+                continue
+        except Exception:
+            pass  # 날짜 파싱 실패 시 해당 메일도 검사
+
         _, data = mail.fetch(msgnum, "(RFC822)")
         msg = email.message_from_bytes(data[0][1])
-
         for part in msg.walk():
-            fn = part.get_filename()
-            if fn and fn.lower().endswith(".xlsx"):
+            raw_fn = part.get_filename()
+            if not raw_fn:
+                continue
+            fn = _decode_filename(raw_fn)
+            if fn.lower().endswith(".xlsx"):
                 payload = part.get_payload(decode=True)
                 save_path = WORK_DIR / fn
                 with open(save_path, "wb") as f:
                     f.write(payload)
-                mail.store(msgnum, "+FLAGS", "\\Seen")
                 found_path = save_path
                 print(f"  → 첨부파일 다운로드: {fn}")
                 break
@@ -344,7 +371,7 @@ def download_excel_from_gmail(config: dict) -> Path:
     mail.logout()
 
     if not found_path:
-        raise FileNotFoundError("미읽음 메일에서 .xlsx 첨부파일을 찾지 못했습니다.")
+        raise FileNotFoundError("처리할 새 메일이 없습니다.")
     return found_path
 
 
@@ -371,7 +398,8 @@ def send_email(config: dict, subject: str, body: str, attachments: list):
             part = MIMEBase("application", "octet-stream")
             part.set_payload(f.read())
         encoders.encode_base64(part)
-        part.add_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        part.add_header("Content-Disposition", "attachment",
+                        filename=("utf-8", "", path.name))
         msg.attach(part)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
@@ -411,7 +439,8 @@ def main():
     # ── 3. Word 생성 ───────────────────────────
     print("\n[3/5] Word 보고서 생성")
     ymd = f"{v['year']}.{v['mm']}.{v['dd']}"
-    out_docx = OUTPUT_DIR / f"최소영업자본액 검토보고서_하우_{ymd}.docx"
+    ymd_compact = f"{v['year']}{v['mm']}{v['dd']}"
+    out_docx = OUTPUT_DIR / f"최소영업자본액_{ymd_compact}.docx"
 
     shutil.copy2(TEMPLATE_DOCX, out_docx)
     doc = Document(out_docx)
@@ -433,7 +462,7 @@ def main():
     print(f"  → {out_pdf.name}")
 
     # ── 6. 이메일 발송 ─────────────────────────
-    subject = f"최소영업자본액 검토보고서_하우_{ymd}"
+    subject = f"최소영업자본액_{ymd_compact}"
     body = (
         f"하우자산운용 주식회사\n"
         f"제{v['ki']}기 ({ymd} 기준) 최소영업자본액 검토보고서\n\n"

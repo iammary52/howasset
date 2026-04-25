@@ -283,23 +283,22 @@ def apply_replacements(doc, v: dict):
 def convert_to_pdf(docx_path: Path, headless: bool = False) -> Path:
     pdf_path = docx_path.with_suffix(".pdf")
 
-    if not headless:
-        # 로컬 Windows: Microsoft Word COM 사용
+    # Microsoft Word COM 시도 (로컬 Windows, headless 무관)
+    try:
+        import win32com.client
+        word = win32com.client.Dispatch("Word.Application")
+        word.Visible = False
         try:
-            import win32com.client
-            word = win32com.client.Dispatch("Word.Application")
-            word.Visible = False
-            try:
-                doc = word.Documents.Open(str(docx_path.resolve()))
-                doc.SaveAs(str(pdf_path.resolve()), FileFormat=17)
-                doc.Close()
-            finally:
-                word.Quit()
-            return pdf_path
-        except ImportError:
-            pass  # pywin32 없으면 LibreOffice로 fallback
+            doc = word.Documents.Open(str(docx_path.resolve()))
+            doc.SaveAs(str(pdf_path.resolve()), FileFormat=17)
+            doc.Close()
+        finally:
+            word.Quit()
+        return pdf_path
+    except ImportError:
+        pass  # pywin32 없으면 LibreOffice로 fallback
 
-    # 클라우드 / headless: LibreOffice 사용
+    # LibreOffice fallback (클라우드/Linux)
     result = subprocess.run(
         ["soffice", "--headless", "--convert-to", "pdf",
          "--outdir", str(docx_path.parent.resolve()),
@@ -351,20 +350,27 @@ def download_excel_from_gmail(config: dict) -> Path:
 
         _, data = mail.fetch(msgnum, "(RFC822)")
         msg = email.message_from_bytes(data[0][1])
+        xlsx_parts = []
         for part in msg.walk():
             raw_fn = part.get_filename()
             if not raw_fn:
                 continue
             fn = _decode_filename(raw_fn)
             if fn.lower().endswith(".xlsx"):
-                payload = part.get_payload(decode=True)
-                save_path = WORK_DIR / fn
-                with open(save_path, "wb") as f:
-                    f.write(payload)
-                found_path = save_path
-                print(f"  → 첨부파일 다운로드: {fn}")
-                break
-        if found_path:
+                xlsx_parts.append((fn, part))
+
+        if xlsx_parts:
+            # 최소영업자본액 포함 파일 우선, 없으면 첫 번째
+            fn, part = next(
+                (x for x in xlsx_parts if "최소영업자본액" in x[0]),
+                xlsx_parts[0]
+            )
+            payload = part.get_payload(decode=True)
+            save_path = WORK_DIR / fn
+            with open(save_path, "wb") as f:
+                f.write(payload)
+            found_path = save_path
+            print(f"  → 첨부파일 다운로드: {fn}")
             break
 
     mail.close()

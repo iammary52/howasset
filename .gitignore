@@ -1,0 +1,5 @@
+config.json
+*.xlsx
+output/
+__pycache__/
+*.pyc

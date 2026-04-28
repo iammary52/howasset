@@ -313,8 +313,15 @@ def download_excel_from_gmail(config: dict) -> Path:
         _, data = mail.fetch(msgnum, "(RFC822)")
         msg = email.message_from_bytes(data[0][1])
         for part in msg.walk():
-            fn = part.get_filename()
-            if fn and fn.lower().endswith(".xlsx"):
+            raw_fn = part.get_filename()
+            if not raw_fn:
+                continue
+            from email.header import decode_header as _dh
+            fn = "".join(
+                p[0].decode(p[1] or "utf-8") if isinstance(p[0], bytes) else p[0]
+                for p in _dh(raw_fn)
+            )
+            if fn.lower().endswith(".xlsx"):
                 payload = part.get_payload(decode=True)
                 save_path = OUTPUT_DIR.parent / fn
                 with open(save_path, "wb") as f:
@@ -355,7 +362,8 @@ def send_email(config: dict, subject: str, body: str, attachments: list):
             part = MIMEBase("application", "octet-stream")
             part.set_payload(f.read())
         encoders.encode_base64(part)
-        part.add_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        part.add_header("Content-Disposition", "attachment",
+                        filename=("utf-8", "", path.name))
         msg.attach(part)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
